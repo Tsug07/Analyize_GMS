@@ -1,0 +1,8 @@
+2026-04-08 10:01:39,145 - ERROR - HTTPError ao enviar Discord webhook: 403 - Forbidden
+2026-04-08 10:07:10,061 - INFO - .env carregado de c:\Users\VM001\Desktop\Hugo\RPA\Analyize_GMS\.env. Chaves: DISCORD_WEBHOOK_URL
+2026-04-08 10:07:11,763 - ERROR - HTTPError 403 ao enviar Discord webhook: Forbidden. Verifique se o webhook foi excluído, regenerado ou se o URL está correto.
+2026-04-08 10:24:43,500 - INFO - .env carregado de c:\Users\VM001\Desktop\Hugo\RPA\Analyize_GMS\.env. Chaves: DISCORD_WEBHOOK_URL
+2026-04-08 10:24:45,221 - ERROR - HTTPError 403 ao enviar Discord webhook: Forbidden. Verifique se o webhook foi excluído, regenerado ou se o URL está correto.
+2026-04-08 10:28:00,143 - INFO - .env carregado de c:\Users\VM001\Desktop\Hugo\RPA\Analyize_GMS\.env. Chaves: DISCORD_WEBHOOK_URL
+2026-04-08 10:28:05,833 - ERROR - HTTPError 403 ao enviar Discord webhook: Forbidden. Verifique se o webhook foi excluído, regenerado ou se o URL está correto.
+2026-04-08 10:31:12,936 - INFO - Notificação enviada ao Discord com sucesso.
