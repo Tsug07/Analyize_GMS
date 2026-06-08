@@ -22,11 +22,15 @@ from dotenv import load_dotenv
 # ============================================================
 
 # Configuração de logging
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+_LOG_PATH = os.path.join(_LOG_DIR, "analytics.log")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("analytics.log", encoding="utf-8"),
+        logging.FileHandler(_LOG_PATH, encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
@@ -108,7 +112,20 @@ class AnalyticsGUI:
                      fill="x", padx=20)
 
         pasta_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
-        pasta_frame.pack(fill="x", padx=20, pady=(5, 20))
+        pasta_frame.pack(fill="x", padx=20, pady=(5, 10))
+
+        # --- Competência ---
+        comp_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        comp_frame.pack(fill="x", padx=20, pady=(0, 10))
+
+        ctk.CTkLabel(comp_frame, text="Competência (MM/AAAA):",
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=(0, 10))
+
+        self.competencia_entry = ctk.CTkEntry(comp_frame, placeholder_text="ex: 05/2026", width=120)
+        self.competencia_entry.pack(side="left")
+
+        ctk.CTkLabel(comp_frame, text="  Funcionários admitidos após essa competência serão ignorados.",
+                     font=ctk.CTkFont(size=11), text_color="gray").pack(side="left")
 
         self.pasta_entry = ctk.CTkEntry(pasta_frame, placeholder_text="Selecione a pasta...",
                                         state="disabled", width=480)
@@ -150,7 +167,16 @@ class AnalyticsGUI:
                       height=40, width=220,
                       fg_color="#5865F2",
                       hover_color="#4752C4",
-                      command=self.testar_webhook).pack(side="left")
+                      command=self.testar_webhook).pack(side="left", padx=(0, 10))
+
+        self.verificar_nomes_btn = ctk.CTkButton(button_frame, text="Verificar Nomes",
+                                                  font=ctk.CTkFont(size=14, weight="bold"),
+                                                  height=40, width=220,
+                                                  fg_color="#2E8B57",
+                                                  hover_color="#1F6B3E",
+                                                  command=self.verificar_nomes,
+                                                  state="disabled")
+        self.verificar_nomes_btn.pack(side="left")
 
     def selecionar_pdf_geral(self):
         filename = filedialog.askopenfilename(
@@ -182,6 +208,10 @@ class AnalyticsGUI:
             self.executar_btn.configure(state="normal")
         else:
             self.executar_btn.configure(state="disabled")
+        if self.pasta_individual_path:
+            self.verificar_nomes_btn.configure(state="normal")
+        else:
+            self.verificar_nomes_btn.configure(state="disabled")
 
     def executar_analise(self):
         if not os.path.exists(self.pdf_geral_path):
@@ -192,6 +222,14 @@ class AnalyticsGUI:
             messagebox.showerror("Erro", "A pasta selecionada não existe!")
             return
 
+        # Validar competência se preenchida
+        competencia = self.competencia_entry.get().strip()
+        if competencia:
+            import re as _re
+            if not _re.match(r'^\d{2}/\d{4}$', competencia):
+                messagebox.showerror("Erro", "Competência inválida. Use o formato MM/AAAA (ex: 05/2026).")
+                return
+
         try:
             self.status_label.configure(text="Iniciando análise...")
             self.progress.set(0)
@@ -200,7 +238,8 @@ class AnalyticsGUI:
             resultado = executar_analise_completa(
                 self.pdf_geral_path,
                 self.pasta_individual_path,
-                self.atualizar_progresso
+                self.atualizar_progresso,
+                competencia=competencia or None
             )
 
             self.progress.set(1)
@@ -248,6 +287,67 @@ class AnalyticsGUI:
             self.status_label.configure(text="Falha ao enviar mensagem de teste para o Discord.")
 
         self.root.update()
+
+    def verificar_nomes(self):
+        if not os.path.exists(self.pasta_individual_path):
+            messagebox.showerror("Erro", "A pasta selecionada não existe!")
+            return
+
+        self.status_label.configure(text="Verificando nomes dos arquivos vs conteúdo...")
+        self.progress.set(0)
+        self.root.update()
+
+        divergencias = verificar_nomes_arquivos_vs_conteudo(
+            self.pasta_individual_path,
+            self.atualizar_progresso
+        )
+
+        self.progress.set(1)
+
+        if not divergencias:
+            self.status_label.configure(text="Verificação concluída: todos os nomes conferem!")
+            enviar_webhook_discord("✅ Verificação de nomes GMS concluída: todos os arquivos conferem com o conteúdo interno.")
+            messagebox.showinfo("Verificação de Nomes", "Todos os arquivos conferem com o conteúdo interno.")
+            return
+
+        # Montar relatório de divergências
+        linhas = [f"Encontradas {len(divergencias)} divergência(s):\n"]
+        for d in divergencias:
+            linhas.append(f"Arquivo:   {d['arquivo']}")
+            linhas.append(f"Nome arquivo: {d['nome_arquivo']}")
+            linhas.append(f"Nome interno: {d['nome_interno']}")
+            linhas.append("")
+
+        texto = "\n".join(linhas)
+
+        # Salvar em arquivo
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        pasta_faltantes = os.path.join(script_dir, "faltantes")
+        os.makedirs(pasta_faltantes, exist_ok=True)
+        output_path = os.path.join(pasta_faltantes, f"divergencias_nomes_{timestamp}.txt")
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(texto)
+
+        # Notificar Discord com detalhes das divergências
+        linhas_discord = [f"⚠️ <@1285316758009544844> Verificação de nomes GMS: {len(divergencias)} divergência(s) encontrada(s).\n"]
+        for d in divergencias:
+            linhas_discord.append(f"📄 **Arquivo:** {d['arquivo']}")
+            linhas_discord.append(f"   Nome arquivo: `{d['nome_arquivo']}`")
+            linhas_discord.append(f"   Nome interno: `{d['nome_interno']}`")
+        mensagem_discord = "\n".join(linhas_discord)
+        # Discord limita mensagens a 2000 caracteres
+        if len(mensagem_discord) > 1900:
+            mensagem_discord = mensagem_discord[:1900] + f"\n... e mais divergências. Veja o relatório completo."
+        enviar_webhook_discord(mensagem_discord)
+
+        self.status_label.configure(text=f"Verificação concluída: {len(divergencias)} divergência(s) encontrada(s).")
+        messagebox.showwarning(
+            "Divergências Encontradas",
+            f"{len(divergencias)} arquivo(s) com nome diferente do conteúdo interno.\n\n"
+            f"Relatório salvo em:\n{os.path.basename(output_path)}\n\n"
+            f"{texto[:800]}{'...' if len(texto) > 800 else ''}"
+        )
 
     def run(self):
         self.root.mainloop()
@@ -308,7 +408,7 @@ def _extrair_nome_do_trecho(trecho: str) -> str:
         'EXPEDICAO', 'EXTERNO', 'FARMACIA', 'FARMACEUTICO', 'FINANCEIRO', 'FISCAL',
         'FRANQUIA', 'GERAL', 'GERAIS', 'GERIAS', 'GERENTE', 'GESTÃO',
         'IMPRESSOR', 'INFOR', 'INSTALACAO', 'INTERIOR', 'INTERNO',
-        'JUNIOR', 'LICITAÇÃO', 'LIMPEZA', 'LINHA', 'LOGISTICA', 'LOJA',
+        'LICITAÇÃO', 'LIMPEZA', 'LINHA', 'LOGISTICA', 'LOJA',
         'MAQUINAS', 'MECANICO', 'MARKETING', 'MONTADOR', 'MONITORAMENTO', 'MOTORISTA',
         'OPERACIONAL', 'OPERADOR', 'OPERADORA', 'PESSOAL', 'PLANEJAMENTO',
         'PLENO', 'PRODUCAO', 'PRODUÇÃO', 'PROGRAMADOR', 'PROMOTOR',
@@ -317,8 +417,17 @@ def _extrair_nome_do_trecho(trecho: str) -> str:
         'SUPERVISOR', 'SUPERVISORA', 'SUPORTE', 'SUPRIMENTOS',
         'TECNICO', 'TÉCNICO', 'VENDAS', 'VENDEDOR', 'VENDEDORA',
         'ACOUGUEIRO', 'BICICLET', 'CFTV',
-        'OP', 'DE', 'DO', 'DA', 'EM', 'E', 'I', 'II', 'III', 'IV', 'IX',
-        'JR', 'PL', 'SR', 'ADM', 'COM', 'PÓS', 'TI', 'RH',
+        'LAVADOR', 'VEICULOS', 'VEICULO', 'DESCARGA', 'CARGA', 'COSTUREIRO', 'COSTUREIRA',
+        'PERFUMISTA', 'PADEIRO', 'PADEIRA', 'GARCOM', 'GARÇOM', 'COPEIRA', 'COPEIRO',
+        'PORTEIRO', 'VIGIA', 'ZELADOR', 'ZELADORA', 'FAXINEIRO', 'FAXINEIRA',
+        'INSTRUMENTADOR', 'INSTRUMENTADORA', 'TORNEIRO', 'SOLDADOR', 'PINTOR', 'PINTORA',
+        'SUBGERENTE', 'SUB', 'CORTADOR', 'CORTADORA', 'PEIXEIRO', 'PEIXEIRA', 'COMERCIO',
+        'TEC', 'TECNICO', 'SEGURANCA', 'SEGURANÇA', 'SEG', 'INFORMATICA', 'INFORMÁTICA',
+        'AUTOMACAO', 'AUTOMAÇÃO', 'AUTOMOCAO', 'SISTEMAS', 'NIVEL', 'NÍVEL', 'TRABALHO', 'A',
+        'ASSIST', 'ASSISTENTE', 'ADMNISTRATIVO', 'OP.DE', 'TECIDO', 'ROUPAS',
+        'SERV', 'GERAL',
+        'OP', 'I', 'II', 'III', 'IV', 'IX',
+        'JUNIOR', 'JR', 'PL', 'SR', 'ADM', 'COM', 'PÓS', 'TI', 'RH',
         '(A)', '(FARMACIA)',
     }
 
@@ -326,21 +435,101 @@ def _extrair_nome_do_trecho(trecho: str) -> str:
     if not palavras:
         return ""
 
-    # Percorre de trás para frente enquanto a palavra parecer cargo
+    # Percorre de trás para frente marcando todas as palavras de cargo,
+    # mesmo que haja palavras de nome intercaladas no meio (ex: "MOREIRA PERFUMISTA- FARMACIA").
+    # Estratégia: encontra o índice mais à esquerda onde ainda há uma sequência
+    # contígua de cargos a partir do final.
+    eh_cargo = []
+    for palavra in palavras:
+        p = palavra.upper().strip('-.,() ')
+        # Remove sufixo "(A)" ou "(a)" colado: "OPERADOR(A)" -> "OPERADOR", "VENDEDOR(A)" -> "VENDEDOR"
+        p_sem_gen = re.sub(r'\([Aa]\)$', '', p).strip()
+        # Abreviações com ponto: "TEC.", "AUX.", "OP.DE" -> pega parte antes do ponto
+        p_base = p.split('.')[0]
+        eh_cargo.append(
+            p in palavras_cargo or
+            p_sem_gen in palavras_cargo or
+            p_base in palavras_cargo or
+            p.startswith('AUX') or
+            p_base.startswith('AUX') or
+            p_base.startswith('TEC') or
+            p_sem_gen.startswith('VENDEDOR') or
+            p_sem_gen.startswith('OPERADOR') or
+            p == '(A)' or p == '(FARMACIA)'
+        )
+
+    # JUNIOR/JR só é cargo quando há outro cargo verdadeiro à sua direita imediata.
+    # Se JUNIOR vem antes do cargo principal (ex: "MAIA JUNIOR VENDEDOR"), ele é nome.
+    # Se JUNIOR vem depois do cargo (ex: "PROGRAMADOR JUNIOR"), ele é qualificador de cargo.
+    # JUNIOR/JR é cargo quando há outro cargo verdadeiro IMEDIATAMENTE à sua esquerda
+    # (ex: "PROGRAMADOR JUNIOR" — PROGRAMADOR é cargo, então JUNIOR qualifica o cargo).
+    # Se não há cargo à esquerda (ex: "MAIA JUNIOR VENDEDOR"), JUNIOR é parte do nome.
+    sufixos_nivel = {'JUNIOR', 'JR'}
+    for i, palavra in enumerate(palavras):
+        p = palavra.upper().strip('-.,() ')
+        if p in sufixos_nivel and eh_cargo[i]:
+            cargo_real_a_esquerda = any(
+                eh_cargo[j] and palavras[j].upper().strip('-.,() ') not in sufixos_nivel
+                for j in range(0, i)
+            )
+            if not cargo_real_a_esquerda:
+                # Não há cargo antes do JUNIOR — é parte do nome
+                eh_cargo[i] = False
+
+    # Preposições que conectam palavras de cargo mas também aparecem em nomes.
+    # Marcamos como "cargo condicional" — só são tratadas como cargo se estiverem
+    # dentro de um bloco de cargos (i.e., há cargo à direita).
+    preposicoes = {'DE', 'DO', 'DA', 'DOS', 'DAS', 'E', 'EM', 'NO', 'NA'}
+
+    # Marca preposições que estão ENTRE cargos no final como cargo também.
+    # Estratégia: percorre da direita, rastreia se há cargo à direita e se há cargo
+    # à esquerda (lookahead). Se sim, a preposição é parte do cargo.
+    tem_cargo_a_direita = False
+    for i in range(len(palavras) - 1, -1, -1):
+        p = palavras[i].upper().strip('-.,() ')
+        if eh_cargo[i]:
+            tem_cargo_a_direita = True
+        elif p in preposicoes and tem_cargo_a_direita:
+            cargo_verdadeiro_esquerda = any(eh_cargo[j] for j in range(0, i))
+            if cargo_verdadeiro_esquerda:
+                eh_cargo[i] = True
+                tem_cargo_a_direita = True
+            else:
+                tem_cargo_a_direita = False
+        else:
+            tem_cargo_a_direita = False
+
+    # Encontra o maior bloco contíguo de cargos no final
     idx_corte = len(palavras)
     for i in range(len(palavras) - 1, -1, -1):
-        palavra = palavras[i].upper().strip('.,()')
-        if palavra in palavras_cargo or palavra.startswith('AUX'):
+        p_upper = palavras[i].upper().strip('-.,() ')
+        if eh_cargo[i]:
+            idx_corte = i
+        elif p_upper in preposicoes and idx_corte < len(palavras):
+            # Preposição entre cargos: trata como transparente (não quebra o bloco)
             idx_corte = i
         else:
+            # Se a palavra não é cargo mas há palavras de cargo depois dela,
+            # verifica se é apenas uma palavra de nome isolada entre cargos
+            # (ex: MOREIRA PERFUMISTA- FARMACIA — MOREIRA é nome, mas está antes de cargo)
+            cargos_depois = sum(1 for j in range(i + 1, len(palavras)) if eh_cargo[j])
+            if cargos_depois >= 1 and i < idx_corte - 1:
+                continue
             break
 
     # O nome são as palavras antes do cargo
     nome = ' '.join(palavras[:idx_corte])
-    return nome.strip()
+    # Remove traços e pontuação solta no final
+    nome = re.sub(r'[\-\.,;]+$', '', nome).strip()
+    return nome
 
 
-def extrair_funcionarios_empregados(caminho_pdf: str) -> dict:
+def extrair_funcionarios_empregados(caminho_pdf: str, competencia: str = None) -> dict:
+    """
+    competencia: string no formato 'MM/AAAA'. Quando informada, funcionários
+    admitidos após essa competência são ignorados (ex: '05/2026' exclui admissões
+    a partir de 01/06/2026).
+    """
     """
     Lê o PDF de Empregados e extrai os funcionários agrupados por empresa.
 
@@ -359,6 +548,18 @@ def extrair_funcionarios_empregados(caminho_pdf: str) -> dict:
         ...
     }
     """
+    # Converter competencia "MM/AAAA" para data limite: primeiro dia do mês seguinte
+    from datetime import date
+    data_limite = None
+    if competencia:
+        try:
+            mes, ano = int(competencia[:2]), int(competencia[3:])
+            mes_seguinte = mes + 1 if mes < 12 else 1
+            ano_seguinte = ano if mes < 12 else ano + 1
+            data_limite = date(ano_seguinte, mes_seguinte, 1)
+        except Exception:
+            logger.warning("Competência inválida: %s. Ignorando filtro.", competencia)
+
     paginas = extrair_texto_pdf(caminho_pdf)
     empresas = {}
 
@@ -380,44 +581,45 @@ def extrair_funcionarios_empregados(caminho_pdf: str) -> dict:
         em_lista = False
 
         for linha in linhas:
-            # Detectar início da lista (linha do cabeçalho da tabela)
             if "CódigoNome" in linha.replace(" ", "") or ("Código" in linha and "Nome" in linha and "Cargo" in linha):
                 em_lista = True
                 continue
-
-            # Detectar fim da lista
             if "Total de empregados" in linha:
                 em_lista = False
                 continue
-
             if not em_lista:
                 continue
 
-            # Linhas de funcionário começam com código numérico colado ao nome
-            # Formato: "5037ELENI TEREZA RODRIGUES OPERADORA DE CAIXA Mensalista 180,00 1101/02/2019 NS"
-            # Estratégia: capturar tudo entre o código e "Mensalista|Horista|..." ,
-            # depois extrair o nome usando o padrão numérico "DDD,DD" (horas) como âncora reversa.
+            # Formato: "5037NOME CARGO Mensalista 220,00 NN DD/MM/AAAA SN"
             match_categoria = re.match(
-                r'^(\d+)(.+?)\s+(Mensalista|Horista|Diarista|Tarefeiro)\s+(\d+[,.]\d{2})',
+                r'^(\d+)(.+?)\s+(Mensalista|Horista|Diarista|Tarefeiro)\s+(\d+[,.]\d{2})\s*\d*(\d{2}/\d{2}/\d{4})',
                 linha, re.IGNORECASE
             )
             if match_categoria:
-                # O trecho entre código e categoria contém "NOME CARGO"
-                # O cargo vem logo antes da categoria. Usamos o valor de horas (ex: 180,00)
-                # para separar: tudo antes do cargo é o nome.
-                # Como não sabemos onde o nome termina e o cargo começa,
-                # usamos heurística: o nome é a sequência mais longa de palavras
-                # totalmente em maiúsculas desde o início, até encontrar uma palavra
-                # que faça parte de um cargo comum.
                 trecho = match_categoria.group(2).strip()
+                data_admissao_str = match_categoria.group(5)
                 nome_func = _extrair_nome_do_trecho(trecho)
-                if nome_func:
-                    funcionarios.append(normalizar_nome(nome_func))
+                if not nome_func:
+                    continue
+
+                # Filtrar por competência: ignorar admissões após o mês da competência
+                if data_limite:
+                    try:
+                        d, m, a = data_admissao_str.split('/')
+                        data_adm = date(int(a), int(m), int(d))
+                        if data_adm >= data_limite:
+                            logger.debug("Ignorando %s: admissão %s após competência %s",
+                                         nome_func, data_admissao_str, competencia)
+                            continue
+                    except Exception:
+                        pass
+
+                funcionarios.append(normalizar_nome(nome_func))
 
         if funcionarios:
             if nome_empresa in empresas:
-                # Empresa com múltiplas páginas
-                empresas[nome_empresa].extend(funcionarios)
+                # Empresa já registrada: ignora páginas duplicadas (inativos/histórico)
+                logger.debug(f"Página {i+1}: empresa '{nome_empresa}' já registrada, ignorando duplicata")
             else:
                 empresas[nome_empresa] = funcionarios
             logger.debug(f"Empresa '{nome_empresa}': {len(funcionarios)} funcionário(s)")
@@ -466,6 +668,130 @@ def extrair_funcionarios_gms(caminho_pdf: str) -> list[str]:
 
 
 # ============================================================
+# VERIFICAÇÃO: NOME DO ARQUIVO vs CONTEÚDO INTERNO
+# ============================================================
+
+def _limpar_nome_pdf(nome: str) -> str:
+    """Remove espaços extras que o leitor de PDF insere dentro das palavras.
+    Ex: 'PONTU AL SHOPPING CHOCOLA TES L TDA' -> 'PONTUAL SHOPPING CHOCOLATES LTDA'
+    Estratégia: une tokens curtos (<=3 chars) ao token anterior se juntos formam palavra coerente.
+    """
+    tokens = nome.split()
+    resultado = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        # Une ao token anterior se ambos são curtos (fragmento de palavra quebrada pelo PDF)
+        # Ex: "CHOCOLA" + "TES" -> "CHOCOLATES", "L" + "TDA" -> "LTDA"
+        if resultado and token.isalpha() and len(resultado[-1]) <= 7 and len(token) <= 4:
+            resultado[-1] = resultado[-1] + token
+        else:
+            resultado.append(token)
+        i += 1
+    return ' '.join(resultado)
+
+
+def extrair_nome_empresa_do_pdf_gms(caminho_pdf: str) -> str:
+    """
+    Extrai o nome da empresa de dentro do PDF individual de GMS.
+    O nome da empresa aparece no cabeçalho logo antes de 'Sindicato dos Empregados',
+    repetido 3 vezes. A segunda ocorrência (após o endereço da empresa) é a mais limpa.
+    """
+    paginas = extrair_texto_pdf(caminho_pdf)
+    if not paginas:
+        return ""
+
+    texto = paginas[0]
+
+    # O nome da empresa aparece antes de "Sindicato dos Empregados" no cabeçalho.
+    # Formato: "NOME DA EMPRESA\nSindicato dos Empregados..."
+    match = re.search(r'([A-ZÁÀÂÃÉÈÊÍÏÓÔÕÖÚÇÑ][^\n]+)\nSindicato\s+dos\s+Empregados', texto, re.IGNORECASE)
+    if match:
+        nome_bruto = match.group(1).strip()
+        # Remove sufixo de endereço que pode vir colado (ex: "NOME | Rua X")
+        nome_bruto = re.split(r'\s*[\|]\s*', nome_bruto)[0].strip()
+        nome_limpo = _limpar_nome_pdf(nome_bruto)
+        nome_norm = normalizar_nome(nome_limpo)
+        if len(nome_norm) > 3:
+            return nome_norm
+
+    # Fallback: pega a terceira ocorrência do nome — aparece após "CARIMBO PADRONIZADO"
+    match2 = re.search(r'CARIMBO\s+P\s*ADRONIZADO\s*\nCNPJ[^\n]+\n([^\n]+)', texto, re.IGNORECASE)
+    if match2:
+        nome_bruto = match2.group(1).strip()
+        nome_limpo = _limpar_nome_pdf(nome_bruto)
+        nome_norm = normalizar_nome(nome_limpo)
+        if len(nome_norm) > 3:
+            return nome_norm
+
+    return ""
+
+
+def verificar_nomes_arquivos_vs_conteudo(diretorio: str, callback_progresso=None) -> list:
+    """
+    Para cada PDF da pasta, compara o nome extraído do nome do arquivo
+    com o nome da empresa encontrado dentro do conteúdo do PDF.
+
+    Retorna lista de dicts com as divergências encontradas.
+    """
+    arquivos = [f for f in os.listdir(diretorio) if f.endswith(".pdf")]
+    total = len(arquivos)
+    divergencias = []
+
+    for i, arquivo in enumerate(arquivos):
+        if callback_progresso:
+            callback_progresso(int((i / total) * 100), f"Verificando {arquivo}...")
+
+        nome_base = arquivo.replace(".pdf", "")
+        if re.match(r'^\d+-.+-\d{6}$', nome_base):
+            partes = nome_base.split("-", 1)
+            resto = partes[1].rsplit("-", 1)
+            if len(resto) < 2:
+                continue
+            nome_arquivo = normalizar_nome(resto[0].strip())
+        elif nome_base.startswith("Relatorio_"):
+            partes = nome_base.split("_", 2)
+            if len(partes) < 3:
+                continue
+            nome_arquivo = normalizar_nome(partes[2].replace("_", " "))
+        else:
+            continue
+        caminho = os.path.join(diretorio, arquivo)
+
+        try:
+            nome_interno = extrair_nome_empresa_do_pdf_gms(caminho)
+        except Exception as e:
+            logger.warning("Erro ao ler %s: %s", arquivo, e)
+            nome_interno = ""
+
+        if not nome_interno:
+            logger.warning("Não foi possível extrair nome interno de: %s", arquivo)
+            continue
+
+        # Compara removendo todos os espaços — o PDF quebra palavras com espaços extras
+        # ex: "DROGARIA SENALTDA" vs "DROGARIA SENA LTDA" → ambos viram "DROGARIASSENALTDA"
+        # Também ignora sufixos como "- ME", "- EPP", "LTDA", "EIRELI" que podem estar truncados
+        def compactar(s):
+            return re.sub(r'[\s\-\.\'\,]', '', s).upper()
+
+        c_arquivo = compactar(nome_arquivo)
+        c_interno = compactar(nome_interno)
+
+        # Considera match se um começa com os primeiros 15 chars do outro (truncamento)
+        prefixo = min(15, len(c_arquivo), len(c_interno))
+        if c_arquivo[:prefixo] != c_interno[:prefixo] and c_arquivo not in c_interno and c_interno not in c_arquivo:
+            divergencias.append({
+                "arquivo": arquivo,
+                "nome_arquivo": nome_arquivo,
+                "nome_interno": nome_interno,
+            })
+            logger.warning("Divergência: arquivo='%s' | interno='%s'", nome_arquivo, nome_interno)
+
+    logger.info("Verificação concluída. %d divergência(s) em %d arquivo(s).", len(divergencias), total)
+    return divergencias
+
+
+# ============================================================
 # ETAPA 2: IDENTIFICAÇÃO DOS ARQUIVOS INDIVIDUAIS
 # ============================================================
 
@@ -486,23 +812,37 @@ def mapear_arquivos_individuais(diretorio: str) -> dict:
     """
     mapa = {}
     for arquivo in os.listdir(diretorio):
-        if not arquivo.startswith("Relatorio_") or not arquivo.endswith(".pdf"):
+        if not arquivo.endswith(".pdf"):
             continue
 
-        # Extrair código e nome: Relatorio_[ID]_[NOME].pdf
-        partes = arquivo.replace(".pdf", "").split("_", 2)
-        if len(partes) < 3:
-            logger.warning(f"Arquivo com formato inesperado: {arquivo}")
+        nome_base = arquivo.replace(".pdf", "")
+
+        # Formato novo: [CODIGO]-[NOME]-[MMAAAA].pdf  ex: 854-DROGARIA SENA LTDA-052026.pdf
+        # Formato antigo: Relatorio_[CODIGO]_[NOME].pdf
+        if re.match(r'^\d+-.+-\d{6}$', nome_base):
+            partes = nome_base.split("-", 1)          # separa código do resto
+            codigo = partes[0]
+            resto = partes[1].rsplit("-", 1)           # separa nome do período (último traço)
+            if len(resto) < 2:
+                logger.warning(f"Arquivo com formato inesperado: {arquivo}")
+                continue
+            nome_empresa = resto[0].strip()
+        elif nome_base.startswith("Relatorio_"):
+            partes = nome_base.split("_", 2)
+            if len(partes) < 3:
+                logger.warning(f"Arquivo com formato inesperado: {arquivo}")
+                continue
+            codigo = partes[1]
+            nome_empresa = partes[2].replace("_", " ")
+        else:
             continue
 
-        codigo = partes[1]
-        nome_empresa = partes[2].replace("_", " ")
-
-        mapa[nome_empresa] = {
+        nome_empresa_norm = normalizar_nome(nome_empresa)
+        mapa[nome_empresa_norm] = {
             "arquivo": arquivo,
             "caminho": os.path.join(diretorio, arquivo),
             "codigo": codigo,
-            "nome_empresa": nome_empresa
+            "nome_empresa": nome_empresa_norm
         }
 
     logger.info(f"Mapeados {len(mapa)} arquivos individuais de GMS.")
@@ -623,15 +963,16 @@ def gerar_relatorio_faltantes(faltantes: list, caminho_saida: str):
 # EXECUÇÃO PRINCIPAL COM INTERFACE
 # ============================================================
 
-def executar_analise_completa(pdf_geral_path, pasta_individual_path, callback_progresso=None):
+def executar_analise_completa(pdf_geral_path, pasta_individual_path, callback_progresso=None, competencia=None):
     """
     Executa a análise completa usando os caminhos fornecidos pela interface.
+    competencia: string 'MM/AAAA' — funcionários admitidos após essa competência são ignorados.
     Retorna um resumo do resultado.
     """
     if callback_progresso:
         callback_progresso(0, "Iniciando análise...")
 
-    logger.info("Iniciando análise GMS...")
+    logger.info("Iniciando análise GMS... Competência: %s", competencia or "não informada")
 
     # 1. Mapear arquivos individuais de GMS
     if callback_progresso:
@@ -640,9 +981,10 @@ def executar_analise_completa(pdf_geral_path, pasta_individual_path, callback_pr
 
     # 2. Extrair funcionários do relatório geral de empregados
     if callback_progresso:
-        callback_progresso(30, f"Lendo empregados: {os.path.basename(pdf_geral_path)}")
+        comp_info = f" (competência {competencia})" if competencia else ""
+        callback_progresso(30, f"Lendo empregados: {os.path.basename(pdf_geral_path)}{comp_info}")
     logger.info(f"Lendo empregados: {pdf_geral_path}")
-    funcionarios_geral = extrair_funcionarios_empregados(pdf_geral_path)
+    funcionarios_geral = extrair_funcionarios_empregados(pdf_geral_path, competencia=competencia)
 
     if not funcionarios_geral:
         raise Exception("Não foi possível extrair funcionários do relatório de empregados.")
@@ -663,10 +1005,11 @@ def executar_analise_completa(pdf_geral_path, pasta_individual_path, callback_pr
     if callback_progresso:
         callback_progresso(90, "Gerando relatório...")
 
-    # Criar nome do arquivo de saída na pasta GMS_Analitics (não misturar com os PDFs)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    output_path = os.path.join(script_dir, f"faltantes_{timestamp}.txt")
+    pasta_faltantes = os.path.join(script_dir, "faltantes")
+    os.makedirs(pasta_faltantes, exist_ok=True)
+    output_path = os.path.join(pasta_faltantes, f"faltantes_{timestamp}.txt")
 
     if faltantes:
         gerar_relatorio_faltantes(faltantes, output_path)
@@ -674,7 +1017,7 @@ def executar_analise_completa(pdf_geral_path, pasta_individual_path, callback_pr
 
         resumo = f"Encontrados {len(faltantes)} funcionários faltantes em {total_empresas} empresas.\nRelatório salvo em: {os.path.basename(output_path)}"
         mensagem_notificacao = (
-            f"⚠️ Análise GMS concluída: {len(faltantes)} funcionário(s) faltante(s) em {total_empresas} empresa(s)."
+            f"⚠️ <@1285316758009544844> <@&1299044385899548752> Análise GMS concluída: {len(faltantes)} funcionário(s) faltante(s) em {total_empresas} empresa(s)."
             f"\nRelatório: {os.path.basename(output_path)}"
         )
     else:
@@ -689,7 +1032,7 @@ def executar_analise_completa(pdf_geral_path, pasta_individual_path, callback_pr
         logger.info("Nenhum funcionário faltante. Todos presentes nos GMS!")
         resumo = f"Nenhum funcionário faltante encontrado!\nTodas as {total_funcionarios} funcionários estão presentes nos relatórios individuais."
         mensagem_notificacao = (
-            f"✅ Análise GMS concluída: nenhum funcionário faltante encontrado."
+            f"✅ <@1285316758009544844> Análise GMS concluída: nenhum funcionário faltante encontrado."
             f"\nTotal de funcionários verificados: {total_funcionarios}."
         )
 
